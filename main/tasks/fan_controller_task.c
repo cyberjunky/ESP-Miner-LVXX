@@ -17,6 +17,13 @@
 #define PID_I 0.1
 #define PID_D 2.0
 
+// Fan control while the ASICs are off (paused or no pool)
+#define IDLE_FAN_COOLDOWN_MS      60000 // keep cooling the heatsinks right after stopping
+#define IDLE_FAN_COOLDOWN_PERCENT 30.0f
+#define IDLE_FAN_PERCENT          0.0f  // nothing to cool once cooled down
+#define IDLE_FAN_VR_HOT_C         45.0f // regulator temp that brings the cooldown speed back
+#define IDLE_FAN_VR_COOL_C        40.0f // ...until it drops below this (hysteresis)
+
 static const char * TAG = "fan_controller";
 static const char * prev_context = "";
 
@@ -67,14 +74,37 @@ void FAN_CONTROLLER_task(void * pvParameters)
 
     TickType_t taskWakeTime = xTaskGetTickCount();
 
+    bool idle_active = false;
+    bool idle_vr_hot = false;
+    TickType_t idle_start = 0;
+
     while (1) {
         if (nvs_config_get_bool(NVS_CONFIG_OVERHEAT_MODE)) {
+            idle_active = false;
             update_fan_speed(GLOBAL_STATE, 100.0f, "Overheat");
-        } else if (GLOBAL_STATE->SYSTEM_MODULE.mining_paused) {
-            update_fan_speed(GLOBAL_STATE, 30.0f, "Paused");
-        } else if (GLOBAL_STATE->SYSTEM_MODULE.pools_unavailable) {
-            update_fan_speed(GLOBAL_STATE, 30.0f, "No pool");
+        } else if (GLOBAL_STATE->SYSTEM_MODULE.mining_paused || GLOBAL_STATE->SYSTEM_MODULE.pools_unavailable) {
+            const char * context = GLOBAL_STATE->SYSTEM_MODULE.mining_paused ? "Paused" : "No pool";
+            TickType_t now = xTaskGetTickCount();
+            if (!idle_active) {
+                idle_active = true;
+                idle_start = now;
+            }
+
+            // ASIC temps can't be read while they're off, so cool for a fixed time first,
+            // then only spin the fans if the regulators warm up (or can't be read).
+            float vr_temp = power_management->vr_temp;
+            bool vr_valid = vr_temp > 0.0f;
+            if (vr_temp >= IDLE_FAN_VR_HOT_C) {
+                idle_vr_hot = true;
+            } else if (vr_valid && vr_temp < IDLE_FAN_VR_COOL_C) {
+                idle_vr_hot = false;
+            }
+            bool cooled_down = (now - idle_start) >= pdMS_TO_TICKS(IDLE_FAN_COOLDOWN_MS);
+
+            float target = (cooled_down && vr_valid && !idle_vr_hot) ? IDLE_FAN_PERCENT : IDLE_FAN_COOLDOWN_PERCENT;
+            update_fan_speed(GLOBAL_STATE, target, context);
         } else {
+            idle_active = false;
             //enable the PID auto control for the FAN if set
             if (nvs_config_get_bool(NVS_CONFIG_AUTO_FAN_SPEED)) {
 
