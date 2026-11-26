@@ -57,6 +57,7 @@ void create_jobs_task(void *pvParameters)
     void *current_work = NULL;
     stratum_protocol_t current_work_protocol = GLOBAL_STATE->stratum_protocol;
     uint64_t extranonce_2 = 0;
+    bool asic_off_logged = false;
     int timeout_ms = ASIC_get_asic_job_frequency_ms(GLOBAL_STATE);
 
     ESP_LOGI(TAG, "ASIC Job Interval: %d ms", timeout_ms);
@@ -176,6 +177,22 @@ void create_jobs_task(void *pvParameters)
             current_work_protocol = active_protocol;
             timeout_ms = ASIC_get_asic_job_frequency_ms(GLOBAL_STATE);
             continue;
+        }
+
+        // ASICs off (mining paused, no pool, overheat, recovery): keep taking new work from the
+        // queue so the latest job is ready, but don't build jobs nobody can mine (and don't log
+        // a warning for every one of them)
+        if (!GLOBAL_STATE->ASIC_initalized) {
+            if (!asic_off_logged) {
+                ESP_LOGI(TAG, "ASIC not initialized, not sending jobs until it is");
+                asic_off_logged = true;
+            }
+            timeout_ms = ASIC_get_asic_job_frequency_ms(GLOBAL_STATE);
+            continue;
+        }
+        if (asic_off_logged) {
+            ESP_LOGI(TAG, "ASIC initialized, sending jobs again");
+            asic_off_logged = false;
         }
 
         // Generate and send job
